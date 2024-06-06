@@ -6,7 +6,7 @@ import re
 from datetime import timedelta, datetime
 import sqlite3
 
-API_TOKEN = '7111897744:AAFtuMLiyONs9aB69uNsc4Xu54QtQHuVZKQ'
+API_TOKEN = '7392955526:AAGavuQbNQlpKV3CsPZAJzApZVIpMoqh-Fk'
 
 bot = telebot.TeleBot(API_TOKEN, parse_mode='HTML')
 
