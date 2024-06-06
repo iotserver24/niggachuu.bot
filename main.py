@@ -63,7 +63,7 @@ def handle_start(message):
                 send_welcome_message(message.chat.id, message.from_user.username, message.from_user.first_name)
                 started_users.add(user_id)
             else:
-                bot.reply_to(message, "<b>You have already joined the required groups. Feel free to use the bot.</b>")
+                bot.reply_to(message, "<b>You have already joined the required groups. Feel free to use the bot.(build by idk but repaired by :- @R3AP3Redit )</b>")
                 started_users.add(user_id)
         else:
             markup = types.InlineKeyboardMarkup()
@@ -100,8 +100,14 @@ def handle_cancel(message):
             bot.reply_to(message, "<b>This command can only be used in private messages.</b>", parse_mode='HTML', reply_markup=markup)
 
 def is_admin(user_id):
-    admin_ids = [5257885057, 5690812882, 6694887060, 7387719195, 6541873974]
+    admin_ids = [5257885057, 5690812882, 6694887060, 7387719195, 6541873974, 6717221647]
     return user_id in admin_ids
+
+  #owner shit
+def is_owner(user_id):
+    owner_ids = [6694887060]
+    return user_id in owner_ids
+
 
 @bot.message_handler(commands=['natures'])
 def handle_natures(message):
