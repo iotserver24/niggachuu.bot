@@ -1,2 +1,4 @@
 pytelegrambotapi
 pymongo
+python-telegram-bot==20.1
+aiohttp==3.8.5
