@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import random
-from telegram import Update, Poll, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+import time  # Import time module to track timing
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.constants import ParseMode, ChatAction
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackContext, ConversationHandler, PollAnswerHandler, filters, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackContext, ConversationHandler, filters, CallbackQueryHandler
 
 # Bot token
 bot_token = '7518438812:AAF29rspjnbm48FQMZXJBCTOL1U5HOUJC-4'
@@ -12,9 +13,11 @@ bot_token = '7518438812:AAF29rspjnbm48FQMZXJBCTOL1U5HOUJC-4'
 (ASK_NAME, ASK_QUESTION_TYPE, ASK_QUESTION, ASK_OPTIONS, ASK_ANSWER, ASK_TIME_GAP, ADD_MORE_QUESTIONS) = range(7)
 
 # Global variables for managing quizzes and participants
-quizzes = {}
-quiz_participants = {}
-user_quizzes = {}
+quizzes = {}  # Stores quizzes
+quiz_participants = {}  # Track participants' answers per quiz
+user_quizzes = {}  # Store quizzes created by users
+active_question = {}  # Stores the current active question for each quiz
+question_results = {}  # Track question-specific results for all questions
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -40,6 +43,7 @@ async def start(update: Update, context: CallbackContext):
                                    parse_mode=ParseMode.MARKDOWN,
                                    reply_markup=reply_markup)
 
+# --- ALL COMMANDS FUNCTION ---
 async def all_commands(update: Update, context: CallbackContext):
     commands = (
         "/start - Start the bot\n"
@@ -119,7 +123,7 @@ async def ask_question_type(update: Update, context: CallbackContext):
         await query.edit_message_text("🔢 You've chosen to create a 'Multiple Questions' quiz.\nPlease send the first question.")
         return ASK_QUESTION
 
-# --- POLL ANSWER TRACKING ---
+# --- QUESTION AND ANSWER HANDLERS ---
 async def ask_question(update: Update, context: CallbackContext):
     context.user_data['current_question'] = update.message.text
     await update.message.reply_text("🤔 Got it! Now, send the options for this question (comma-separated).")
@@ -134,8 +138,8 @@ async def ask_options(update: Update, context: CallbackContext):
 async def ask_answer(update: Update, context: CallbackContext):
     try:
         if update.message.text.isdigit():
-            correct_answer = int(update.message.text)
-            context.user_data['correct_answer'] = correct_answer - 1
+            correct_answer = int(update.message.text) - 1  # Correct answer in 0-based index
+            context.user_data['correct_answer'] = correct_answer
 
             context.user_data['questions'].append({
                 'question': context.user_data['current_question'],
@@ -191,7 +195,7 @@ async def finalize_quiz(update: Update, context: CallbackContext):
     await update.message.reply_text(f"🚀 You have completed the quiz! You can start it with /startquiz {quiz_name}.")
     return ConversationHandler.END
 
-# --- START QUIZ AND SEND POLLS ---
+# --- START QUIZ WITH SIMPLE MESSAGE QUESTIONS ---
 async def start_quiz(update: Update, context: CallbackContext):
     args = context.args
     user_id = update.message.from_user.id
@@ -212,60 +216,134 @@ async def start_quiz(update: Update, context: CallbackContext):
 
     await update.message.reply_text(f"🚀 Starting quiz '{quiz_name}'!")
 
-    # Send the questions one by one with the specified time gap
+    # Reset participants for the entire quiz
+    if quiz_name not in question_results:
+        question_results[quiz_name] = {}
+
+    # Send the questions one by one as a message and handle answers with time gap
     for idx, question_data in enumerate(quiz['questions']):
-        poll_message = await context.bot.send_poll(
+        active_question[quiz_name] = {
+            'question_index': idx,
+            'correct_answer': question_data['correct_answer'],
+            'start_time': time.time(),
+            'participants': {}  # Track participants for each question
+        }
+
+        # Send the question as a simple message
+        question_text = f"❓ *Question {idx + 1}:* {question_data['question']}\n" + \
+                        "\n".join([f"{i + 1}. {opt}" for i, opt in enumerate(question_data['options'])])
+        await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            question=question_data['question'],
-            options=question_data['options'],
-            is_anonymous=False,  # Non-anonymous poll to track users
-            type=Poll.QUIZ,
-            correct_option_id=question_data['correct_answer']
+            text=question_text,
+            parse_mode=ParseMode.MARKDOWN
         )
 
-        # Track poll IDs for results later
-        if quiz_name not in quiz_participants:
-            quiz_participants[quiz_name] = {}
-        quiz_participants[quiz_name]['poll_message_ids'] = poll_message.poll.id
-
-        # Wait for the time gap between questions
+        # Wait for the time gap before the next question
         time_gap = quiz.get('time_gap', 0)
         if time_gap > 0 and idx < len(quiz['questions']) - 1:
-            await update.message.reply_text(f"⏳ Next question in {time_gap} seconds...")
             await asyncio.sleep(time_gap)
 
-# --- HANDLE POLL ANSWERS ---
-async def handle_poll_answer(update: Update, context: CallbackContext):
-    answer = update.poll_answer
+    # After sending all questions, automatically send results to the creator
+    await send_results_to_creator(update, context, quiz_name)
+
+# --- HANDLE TEXT ANSWERS ---
+async def handle_text_answer(update: Update, context: CallbackContext):
+    if not update.message or not update.message.text.isdigit():  # Ensure only numeric answers are handled
+        return
+
+    user = update.message.from_user
+    user_id = user.id
+    answer_text = update.message.text.strip()
+
     quiz_name = None
 
-    # Find which quiz the poll belongs to
-    for qname, data in quizzes.items():
-        if 'poll_message_ids' in data and data['poll_message_ids'] == answer.poll_id:
+    # Find the active quiz
+    for qname, data in active_question.items():
+        if data:
             quiz_name = qname
             break
 
     if not quiz_name:
+        return  # Ignore if there's no active question
+
+    quiz_data = active_question[quiz_name]
+    participants = quiz_data['participants']
+    question_index = quiz_data['question_index']
+
+    # Check if the user has already answered
+    if user_id in participants:
+        return  # Ignore further answers from the same user for this question
+
+    # Validate if the answer is within the options
+    answer = int(answer_text) - 1  # Convert to 0-based index
+    correct_answer = quiz_data['correct_answer']
+
+    # Check if the answer is correct
+    if answer == correct_answer:
+        time_taken = time.time() - quiz_data['start_time']
+        participants[user_id] = {'correct': True, 'time_taken': time_taken}
+    else:
+        participants[user_id] = {'correct': False, 'time_taken': None}
+
+    # Store the participant's result for this question in question_results
+    if quiz_name not in question_results:
+        question_results[quiz_name] = {}
+    
+    if question_index not in question_results[quiz_name]:
+        question_results[quiz_name][question_index] = {}
+
+    question_results[quiz_name][question_index][user_id] = {
+        'correct': answer == correct_answer,
+        'time_taken': time_taken if answer == correct_answer else None
+    }
+
+# --- SEND RESULTS TO CREATOR ---
+async def send_results_to_creator(update: Update, context: CallbackContext, quiz_name: str):
+    quiz = quizzes.get(quiz_name)
+    creator_id = quiz['creator']
+    
+    if quiz_name not in question_results or not question_results[quiz_name]:
+        await context.bot.send_message(chat_id=creator_id, text="No participants answered any questions.")
         return
 
-    quiz = quizzes[quiz_name]
-    user_id = answer.user.id
+    # Prepare the results message per question
+    result_message = f"📊 *Results for Quiz '{quiz_name}':*\n\n"
+    for question_index, participants in question_results[quiz_name].items():
+        result_message += f"**Results for Question {question_index + 1}:**\n"
+        sorted_participants = sorted(participants.items(), key=lambda x: (x[1]['correct'], -x[1]['time_taken']), reverse=True)
 
-    # Track participant answers for each quiz
-    if user_id not in quiz_participants[quiz_name]:
-        quiz_participants[quiz_name][user_id] = {
-            'correct': 0,
-            'total': 0
-        }
+        for i, (user_id, result) in enumerate(sorted_participants, start=1):
+            user = await context.bot.get_chat(user_id)
+            result_message += f"{i}. {user.username or user.first_name}: {'Correct' if result['correct'] else 'Incorrect'} "
+            if result['correct']:
+                result_message += f"(answered in {result['time_taken']:.2f} seconds)\n"
+            else:
+                result_message += "\n"
 
-    # Check if the answer is correct and update participant's score
-    correct_option_id = quiz['questions'][answer.option_ids[0]]['correct_answer']
-    if answer.option_ids[0] == correct_option_id:
-        quiz_participants[quiz_name][user_id]['correct'] += 1
+    # Summarize the top 3 participants with the most correct answers
+    correct_answers_summary = {}
+    for participants in question_results[quiz_name].values():
+        for user_id, result in participants.items():
+            if result['correct']:
+                correct_answers_summary[user_id] = correct_answers_summary.get(user_id, 0) + 1
 
-    quiz_participants[quiz_name][user_id]['total'] += 1
+    sorted_summary = sorted(correct_answers_summary.items(), key=lambda x: x[1], reverse=True)
+    result_message += "\n🏆 **Overall Quiz Winners:**\n"
+    for i, (user_id, correct_answers) in enumerate(sorted_summary[:3], start=1):
+        user = await context.bot.get_chat(user_id)
+        result_message += f"{i}. {user.username or user.first_name}: {correct_answers} correct answers\n"
 
-# --- SEND RESULTS TO THE CREATOR PRIVATELY ---
+    # Escape special characters in result_message for Markdown
+    result_message = result_message.replace("_", "\\_").replace("*", "\\*")
+
+    # Send the results privately to the creator
+    try:
+        await context.bot.send_message(chat_id=creator_id, text=result_message, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Error sending results to creator: {e}")
+        await context.bot.send_message(chat_id=creator_id, text="❌ An error occurred while sending the results.")
+
+# --- /RESULTS COMMAND TO RETRIEVE RESULTS ---
 async def end_quiz(update: Update, context: CallbackContext):
     args = context.args
     if not args:
@@ -277,53 +355,8 @@ async def end_quiz(update: Update, context: CallbackContext):
         await update.message.reply_text("❌ Quiz not found. Please provide a valid quiz name.")
         return
 
-    quiz = quizzes[quiz_name]
-    creator_id = quiz['creator']
-
-    if quiz_name not in quiz_participants or len(quiz_participants[quiz_name]) <= 1:  # Check if any participant exists
-        await update.message.reply_text("❌ No participants for this quiz.")
-        return
-
-    # Prepare and sort results by the number of correct answers
-    sorted_participants = sorted(quiz_participants[quiz_name].items(), key=lambda x: x[1]['correct'], reverse=True)
-
-    result_message = f"📊 Results for quiz '{quiz_name}':\n"
-    for i, (user_id, scores) in enumerate(sorted_participants, start=1):
-        if user_id == 'poll_message_ids':  # Skip poll_message_ids key
-            continue
-        user = await context.bot.get_chat(user_id)
-        result_message += f"{i}. {user.username or user.first_name}: {scores['correct']} correct out of {scores['total']} questions\n"
-
-    # Send the results only to the creator in their private chat
-    try:
-        await context.bot.send_message(chat_id=creator_id, text=result_message)
-        await update.message.reply_text("✔ Results have been sent privately to the quiz creator.")
-    except Exception as e:
-        logger.error(f"Error sending results to creator: {e}")
-        await update.message.reply_text("❌ An error occurred while sending the results.")
-
-# --- RANDOM WINNER COMMAND ---
-async def random_winner(update: Update, context: CallbackContext):
-    chat = update.effective_chat
-    user = update.effective_user
-
-    if chat.type != "group" and chat.type != "supergroup":
-        await update.message.reply_text("❌ This command can only be used in groups.")
-        return
-
-    member_status = await context.bot.get_chat_member(chat_id=chat.id, user_id=user.id)
-    if member_status.status not in ['administrator', 'creator']:
-        await update.message.reply_text("❌ Only admins can use this command.")
-        return
-
-    members = await context.bot.get_chat_administrators(chat.id)
-    members_list = [member.user for member in members if not member.user.is_bot]
-
-    if members_list:
-        winner = random.choice(members_list)
-        await update.message.reply_text(f"🎉 The winner is @{winner.username or winner.first_name}! 🏆🎊")
-    else:
-        await update.message.reply_text("❌ No eligible users found in this group.")
+    # Send results to the quiz creator using the send_results_to_creator function
+    await send_results_to_creator(update, context, quiz_name)
 
 # --- DELETE QUIZ FUNCTION ---
 async def delete_quiz(update: Update, context: CallbackContext):
@@ -371,12 +404,11 @@ def main():
     application.add_handler(CommandHandler("allcommands", all_commands))
     application.add_handler(CommandHandler("startquiz", start_quiz))
     application.add_handler(CommandHandler("deletequiz", delete_quiz))
+    application.add_handler(CommandHandler("deletequiz", delete_quiz))
     application.add_handler(CommandHandler("results", end_quiz))
-    application.add_handler(CommandHandler("random", random_winner))
-    application.add_handler(PollAnswerHandler(handle_poll_answer))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_answer))
 
     application.run_polling()
-
 
 if __name__ == '__main__':
     main()
