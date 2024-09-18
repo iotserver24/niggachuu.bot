@@ -12,6 +12,10 @@ bot_token = '7518438812:AAF29rspjnbm48FQMZXJBCTOL1U5HOUJC-4'
 # Quiz states
 (ASK_NAME, ASK_QUESTION_TYPE, ASK_QUESTION, ASK_OPTIONS, ASK_ANSWER, ASK_TIME_GAP, ADD_MORE_QUESTIONS) = range(7)
 
+def main():
+    port = int(os.environ.get('PORT', 8080))  # Fetch port from environment variable
+
+
 # Global variables for managing quizzes and participants
 quizzes = {}  # Stores quizzes
 quiz_participants = {}  # Track participants' answers per quiz
