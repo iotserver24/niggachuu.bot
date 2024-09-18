@@ -1,0 +1,11 @@
+# Exported from Render on 2024-09-18T12:30:30Z
+services:
+- type: web
+  name: Quizzbotshp
+  runtime: python
+  repo: https://github.com/iotserver24/niggachuu.bot
+  plan: free
+  region: oregon
+  buildCommand: pip install -r requirements.txt
+  startCommand: python3 quizz.py
+version: "1"
